@@ -46,6 +46,7 @@ torchrun --standalone --nproc_per_node 8 main_finetune.py --batch_size 32 --accu
 ```
 
 ## ✍ Citation
+```
 @misc{ren2024autoregressive,
       title={Autoregressive Pretraining with Mamba in Vision}, 
       author={Sucheng Ren and Xianhang Li and Haoqin Tu and Feng Wang and Fangxun Shu and Lei Zhang and Jieru Mei and Linjie Yang and Peng Wang and Heng Wang and Alan Yuille and Cihang Xie},
@@ -54,6 +55,7 @@ torchrun --standalone --nproc_per_node 8 main_finetune.py --batch_size 32 --accu
       archivePrefix={arXiv},
       primaryClass={cs.CV}
 }
+```
 If you have any question, feel free to contact [Sucheng Ren](https://oliverrensu.github.io/) :)
 
 
