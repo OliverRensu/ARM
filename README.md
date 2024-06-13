@@ -29,6 +29,7 @@ torchrun --standalone --nproc_per_node=8 --master_port 1221 main_pretrain.py \
 
 ## Finetuning
 ```bash
+cd Finetuning
 torchrun --standalone --nproc_per_node 8 main_finetune.py --batch_size 128 \
     --model arm_base_pz16 --finetune ./checkpoint-1599.pth \
     --epochs 100 --global_pool True \
@@ -36,7 +37,7 @@ torchrun --standalone --nproc_per_node 8 main_finetune.py --batch_size 128 \
     --weight_decay 0.05 --drop_path 0.1 --reprob 0.25 --mixup 0.8 --cutmix 1.0 \
     --dist_eval --data_path /path/to/ImageNet --output_dir ./out_finetune_b/
 
-
+cd Finetuning
 torchrun --standalone --nproc_per_node 8 main_finetune.py --batch_size 32 --accum_iter 4 \
       --model arm_large_pz16 --finetune ./checkpoint-1599.pth\
       --epochs 100 --global_pool True  --ema_decay 0.99992 \

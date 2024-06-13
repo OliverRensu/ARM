@@ -4,7 +4,7 @@ from functools import partial
 from torch import Tensor
 from typing import Optional
 
-from timm.models.vision_transformer import _cfg
+from timm.models.vision_transformer import VisionTransformer, _cfg
 from timm.models.registry import register_model
 from timm.models.layers import trunc_normal_, lecun_normal_
 
@@ -12,14 +12,15 @@ from timm.models.layers import DropPath, to_2tuple
 from timm.models.vision_transformer import _load_weights
 
 import math
-
 from mamba_simple import Mamba
-
+from mamba_ssm.utils.generation import GenerationMixin
+from mamba_ssm.utils.hf import load_config_hf, load_state_dict_hf
 
 try:
     from mamba_ssm.ops.triton.layernorm import RMSNorm, layer_norm_fn, rms_norm_fn
 except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
+
 
 
 
@@ -80,7 +81,7 @@ class SwiGLU(nn.Module):
 
 class Block(nn.Module):
     def __init__(
-        self, dim, mixer_cls, fused_add_norm=False, residual_in_fp32=False,drop_path=0.,
+        self, dim, mixer_cls, norm_cls=nn.LayerNorm, fused_add_norm=False, residual_in_fp32=False,drop_path=0.,
     ):
         """
         Simple block wrapping a mixer class with LayerNorm/RMSNorm and residual connection"
@@ -142,6 +143,7 @@ def create_block(
     block = Block(
         d_model,
         mixer_cls,
+        norm_cls=norm_cls,
         drop_path=drop_path,
         fused_add_norm=fused_add_norm,
         residual_in_fp32=residual_in_fp32,
@@ -198,7 +200,7 @@ def segm_init_weights(m):
         nn.init.ones_(m.weight)
 
 
-class VisionMamba(nn.Module):
+class ARM(nn.Module):
     def __init__(self, 
                  img_size=224, 
                  patch_size=16, 
@@ -217,9 +219,12 @@ class VisionMamba(nn.Module):
                  residual_in_fp32=False,
                  device=None,
                  dtype=None,
+                 ft_seq_len=None,
+                 pt_hw_seq_len=14,
                  if_bidirectional=False,
                  final_pool_type='none',
                  if_abs_pos_embed=False,
+                 if_rope=False,
                  if_rope_residual=False,
                  flip_img_sequences_ratio=-1.,
                  if_bimamba=False,
@@ -228,6 +233,7 @@ class VisionMamba(nn.Module):
                  if_devide_out=False,
                  init_layer_scale=None,
                  use_double_cls_token=False,
+                 use_middle_cls_token=False,
                  global_pool=False,
                  **kwargs):
         factory_kwargs = {"device": device, "dtype": dtype}
@@ -239,11 +245,12 @@ class VisionMamba(nn.Module):
         self.if_bidirectional = if_bidirectional
         self.final_pool_type = final_pool_type
         self.if_abs_pos_embed = if_abs_pos_embed
-
+        self.if_rope = if_rope
         self.if_rope_residual = if_rope_residual
         self.flip_img_sequences_ratio = flip_img_sequences_ratio
         self.if_cls_token = if_cls_token
         self.use_double_cls_token = use_double_cls_token
+        self.use_middle_cls_token = use_middle_cls_token
         self.num_tokens = 1 if if_cls_token else 0
         self.global_pool=global_pool
         # pretrain parameters
@@ -254,10 +261,27 @@ class VisionMamba(nn.Module):
             img_size=img_size, patch_size=patch_size, stride=stride, in_chans=channels, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+        if if_cls_token:
+            if use_double_cls_token:
+                self.cls_token_head = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+                self.cls_token_tail = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+                self.num_tokens = 2
+            else:
+                self.cls_token = nn.Parameter(torch.zeros(1, 1, self.embed_dim))
+                # self.num_tokens = 1
+            
         if if_abs_pos_embed:
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + self.num_tokens, self.embed_dim))
             self.pos_drop = nn.Dropout(p=drop_rate)
+
+        if if_rope:
+            half_head_dim = embed_dim // 2
+            hw_seq_len = img_size // patch_size
+            self.rope = VisionRotaryEmbeddingFast(
+                dim=half_head_dim,
+                pt_seq_len=pt_hw_seq_len,
+                ft_seq_len=hw_seq_len
+            )
         self.head = nn.Linear(self.num_features, num_classes) if num_classes > 0 else nn.Identity()
 
 
@@ -287,15 +311,23 @@ class VisionMamba(nn.Module):
                 for i in range(depth)
             ]
         )
+        
         # output head
         self.norm_f = nn.LayerNorm(embed_dim)
+
+        # self.pre_logits = nn.Identity()
 
         # original init
         self.patch_embed.apply(segm_init_weights)
         self.head.apply(segm_init_weights)
         if if_abs_pos_embed:
             trunc_normal_(self.pos_embed, std=.02)
-        trunc_normal_(self.cls_token, std=.02)
+        if if_cls_token:
+            if use_double_cls_token:
+                trunc_normal_(self.cls_token_head, std=.02)
+                trunc_normal_(self.cls_token_tail, std=.02)
+            else:
+                trunc_normal_(self.cls_token, std=.02)
 
         # mamba init
         self.apply(
@@ -305,6 +337,7 @@ class VisionMamba(nn.Module):
                 **(initializer_cfg if initializer_cfg is not None else {}),
             )
         )
+
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return {
@@ -320,8 +353,9 @@ class VisionMamba(nn.Module):
     def load_pretrained(self, checkpoint_path, prefix=""):
         _load_weights(self, checkpoint_path, prefix)
 
-    def forward_features(self, x, inference_params=None):
+    def forward_features(self, x, inference_params=None, if_random_cls_token_position=False, if_random_token_rank=False):
         # taken from https://github.com/rwightman/pytorch-image-models/blob/master/timm/models/vision_transformer.py
+        # with slight modifications to add the dist_token
         x = self.patch_embed(x)
         B, M, _ = x.shape
 
@@ -332,41 +366,74 @@ class VisionMamba(nn.Module):
         x = x + self.pos_embed
         x = self.pos_drop(x)
         # mamba impl
+        residual = None
         hidden_states = x
         for layer in self.layers:
+            # rope about
+            if self.if_rope:
+                hidden_states = self.rope(hidden_states)
+                if residual is not None and self.if_rope_residual:
+                    residual = self.rope(residual)
+
+
             hidden_states = layer(
                 hidden_states, inference_params=inference_params
             )
+            # print("-------------------------")
         hidden_states = self.norm_f(hidden_states)
+
         if self.global_pool:
             return (hidden_states[:, :token_position, :].mean(1)+hidden_states[:, token_position+1:, :].mean(1))/2.
         else:
             return hidden_states[:, token_position, :]
 
-    def forward(self, x, return_features=False, inference_params=None):
-        x = self.forward_features(x, inference_params)
+
+
+    def forward(self, x, return_features=False, inference_params=None, if_random_cls_token_position=False, if_random_token_rank=False):
+        x = self.forward_features(x, inference_params, if_random_cls_token_position=if_random_cls_token_position, if_random_token_rank=if_random_token_rank)
         if return_features:
             return x
         x = self.head(x)
         return x
 
+
+
 @register_model
 def arm_base_pz16(pretrained=False, **kwargs):
-    model = VisionMamba(
-        patch_size=16, embed_dim=768, depth=12, rms_norm=True, residual_in_fp32=True, fused_add_norm=True, final_pool_type='mean', if_abs_pos_embed=True, if_rope_residual=False, bimamba_type="v3", if_cls_token=True, if_devide_out=True, **kwargs)
+    model = ARM(
+        patch_size=16, embed_dim=768, depth=12, rms_norm=True, residual_in_fp32=True, fused_add_norm=True, final_pool_type='mean', if_abs_pos_embed=True, if_rope=False, if_rope_residual=False, bimamba_type="v3", if_cls_token=True, if_devide_out=True, use_middle_cls_token=True, **kwargs)
     model.default_cfg = _cfg()
+    if pretrained:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="to.do",
+            map_location="cpu", check_hash=True
+        )
+        model.load_state_dict(checkpoint["model"])
+    return model
+
+
+@register_model
+def arm_large_pz16(pretrained=False, **kwargs):
+    model = ARM(
+        patch_size=16, embed_dim=1024, depth=24, rms_norm=True, residual_in_fp32=True, fused_add_norm=True, final_pool_type='mean', if_abs_pos_embed=True, if_rope=False, if_rope_residual=False, bimamba_type="v3", if_cls_token=True, if_devide_out=True, use_middle_cls_token=True, **kwargs)
+    model.default_cfg = _cfg()
+    if pretrained:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="to.do",
+            map_location="cpu", check_hash=True
+        )
+        model.load_state_dict(checkpoint["model"])
     return model
 
 @register_model
-def vim_large_pz16(pretrained=False, **kwargs):
-    model = VisionMamba(
-        patch_size=16, embed_dim=1024, depth=24, rms_norm=True, residual_in_fp32=True, fused_add_norm=True, final_pool_type='mean', if_abs_pos_embed=True, if_rope_residual=False, bimamba_type="v3", if_cls_token=True, if_devide_out=True, **kwargs)
+def arm_huge_pz16(pretrained=False, **kwargs):
+    model = ARM(
+        patch_size=16, embed_dim=1536, depth=24, rms_norm=True, residual_in_fp32=True, fused_add_norm=True, final_pool_type='mean', if_abs_pos_embed=True, if_rope=False, if_rope_residual=False, bimamba_type="v3", if_cls_token=True, if_devide_out=True, use_middle_cls_token=True, **kwargs)
     model.default_cfg = _cfg()
-    return model
-
-@register_model
-def vim_huge_pz16(pretrained=False, **kwargs):
-    model = VisionMamba(
-        patch_size=16, embed_dim=1536, depth=24, rms_norm=True, residual_in_fp32=True, fused_add_norm=True, final_pool_type='mean', if_abs_pos_embed=True, if_rope_residual=False, bimamba_type="v3", if_cls_token=True, if_devide_out=True, **kwargs)
-    model.default_cfg = _cfg()
+    if pretrained:
+        checkpoint = torch.hub.load_state_dict_from_url(
+            url="to.do",
+            map_location="cpu", check_hash=True
+        )
+        model.load_state_dict(checkpoint["model"])
     return model

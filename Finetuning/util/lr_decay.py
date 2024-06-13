@@ -11,8 +11,6 @@
 
 import json
 
-import json
-
 
 def param_groups_lrd(model, weight_decay=0.05, no_weight_decay_list=[], layer_decay=.75):
     """
@@ -37,7 +35,7 @@ def param_groups_lrd(model, weight_decay=0.05, no_weight_decay_list=[], layer_de
         else:
             g_decay = "decay"
             this_decay = weight_decay
-
+            
         layer_id = get_layer_id_for_vit(n, num_layers)
         group_name = "layer_%d_%s" % (layer_id, g_decay)
 

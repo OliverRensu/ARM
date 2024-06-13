@@ -1,3 +1,8 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
 # --------------------------------------------------------
 # References:
 # DeiT: https://github.com/facebookresearch/deit
@@ -13,8 +18,8 @@ import torch
 from timm.data import Mixup
 from timm.utils import accuracy
 
-import utils.misc as misc
-import utils.lr_sched as lr_sched
+import util.misc as misc
+import util.lr_sched as lr_sched
 
 
 def train_one_epoch(model: torch.nn.Module, model_ema, criterion: torch.nn.Module,

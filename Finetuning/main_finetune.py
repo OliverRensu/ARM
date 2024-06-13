@@ -1,3 +1,8 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
 # --------------------------------------------------------
 # References:
 # DeiT: https://github.com/facebookresearch/deit
@@ -5,6 +10,7 @@
 # --------------------------------------------------------
 
 import argparse
+import datetime
 import json
 import numpy as np
 import os
@@ -21,13 +27,13 @@ from timm.models.layers import trunc_normal_
 from timm.data.mixup import Mixup
 from timm.loss import LabelSmoothingCrossEntropy, SoftTargetCrossEntropy
 
-import utils.lr_decay as lrd
-import utils.misc as misc
-from utils.datasets import build_dataset
-from utils.pos_embed import interpolate_pos_embed
-from utils.misc import NativeScalerWithGradNormCount as NativeScaler
+import util.lr_decay as lrd
+import util.misc as misc
+from util.datasets import build_dataset
+from util.pos_embed import interpolate_pos_embed
+from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
-import models_finetune
+import models_mamba
 
 from engine_finetune import train_one_epoch, evaluate
 
@@ -43,7 +49,7 @@ def get_args_parser():
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
 
     # Model parameters
-    parser.add_argument('--model', default='arm_base_pz16', type=str, metavar='MODEL',
+    parser.add_argument('--model', default='vit_large_patch16', type=str, metavar='MODEL',
                         help='Name of model to train')
 
     parser.add_argument('--input_size', default=224, type=int,
@@ -219,7 +225,7 @@ def main(args):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
     
-    model = models_finetune.__dict__[args.model](
+    model = models_mamba.__dict__[args.model](
         num_classes=args.nb_classes,
         drop_path_rate=args.drop_path,
         global_pool=args.global_pool,
@@ -257,6 +263,7 @@ def main(args):
 
         # interpolate position embedding
         new_dict = interpolate_pos_embed(model, new_dict)
+
         # load pre-trained model
         msg = model.load_state_dict(new_dict, strict=False)
         print(msg)
@@ -317,7 +324,7 @@ def main(args):
         criterion = torch.nn.CrossEntropyLoss()
 
     print("criterion = %s" % str(criterion))
-    max_accuracy, ema_max_accuracy=misc.finetune_load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
+    max_accuracy, ema_max_accuracy=misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
     if max_accuracy>0:
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
@@ -325,7 +332,7 @@ def main(args):
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {ema_test_stats['acc1']:.1f}%")
 
     if args.eval:
-        model.module.load_state_dict(torch.load(args.resume, map_location='cpu')['model_ema'])
+        model.module.load_state_dict(torch.load("./out_finetune_cluster_xh_bigema/checkpoint-70.pth", map_location='cpu')['model_ema'])
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
         exit(0)
@@ -346,14 +353,23 @@ def main(args):
 
         test_stats = evaluate(data_loader_val, model, device)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%")
+        if max_accuracy<test_stats["acc1"]:
+            misc.save_model(
+                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                loss_scaler=loss_scaler, epoch=-10, model_ema=model_ema, max_accuracy=max_accuracy, ema_max_accuracy=ema_max_accuracy)
         max_accuracy = max(max_accuracy, test_stats["acc1"])
         print(f'Max accuracy: {max_accuracy:.2f}%')
+
         ema_test_stats = evaluate(data_loader_val, model_ema.ema, device)
+        if ema_max_accuracy < ema_test_stats["acc1"]:
+            misc.save_model(
+                args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
+                loss_scaler=loss_scaler, epoch=-20, model_ema=model_ema, max_accuracy=max_accuracy, ema_max_accuracy=ema_max_accuracy)
         print(f"Accuracy of the network on the {len(dataset_val)} test images: {ema_test_stats['acc1']:.1f}%")
         ema_max_accuracy = max(ema_max_accuracy, ema_test_stats["acc1"])
         print(f'Max accuracy: {ema_max_accuracy:.2f}%')
         if args.output_dir and (epoch % 10 == 0 or epoch + 1 == args.epochs):
-            misc.finetune_save_model(
+            misc.save_model(
                 args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                 loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema, max_accuracy=max_accuracy, ema_max_accuracy=ema_max_accuracy)
 
