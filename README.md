@@ -46,6 +46,9 @@ torchrun --standalone --nproc_per_node 8 main_finetune.py --batch_size 32 --accu
       --dist_eval --data_path /data1/data/ImageNet --output_dir ./out_finetune_l/
 ```
 
+## Checkpoint
+The pretrained models are available at [[huggingface🤗](https://huggingface.co/OliverRen/ARM)]
+
 ## ✍ Citation
 ```
 @misc{ren2024autoregressive,
