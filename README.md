@@ -1,5 +1,10 @@
 # ARM
+
+
+
 This repository is the official implementation of our  [**Autoregressive Pretraining with Mamba in Vision**](https://arxiv.org/abs/2406.07537)
+
+## 🎉ARM is accepted by ICLR2025!
 
 ![img](teaser.png)
 
@@ -51,13 +56,12 @@ The pretrained models are available at [[huggingface🤗](https://huggingface.co
 
 ## ✍ Citation
 ```
-@misc{ren2024autoregressive,
+@inproceedings{ren2025autoregressive,
       title={Autoregressive Pretraining with Mamba in Vision}, 
       author={Sucheng Ren and Xianhang Li and Haoqin Tu and Feng Wang and Fangxun Shu and Lei Zhang and Jieru Mei and Linjie Yang and Peng Wang and Heng Wang and Alan Yuille and Cihang Xie},
-      year={2024},
-      eprint={2406.07537},
-      archivePrefix={arXiv},
-      primaryClass={cs.CV}
+      booktitle={The Thirteenth International Conference on Learning Representations},
+    year={2025},
+    url={https://openreview.net/forum?id=PQpvhUrA1C}
 }
 ```
 If you have any question, feel free to contact [Sucheng Ren](https://oliverrensu.github.io/) :)
